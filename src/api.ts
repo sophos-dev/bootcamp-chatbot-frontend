@@ -1,6 +1,6 @@
 // Thin typed wrappers around the FastAPI backend (proxied under /api by Vite).
 
-export type Role = 'user' | 'assistant' | 'system-notification'
+export type Role = 'user' | 'assistant' | 'system-notification' | 'note'
 
 export interface ConversationSummary {
   id: number
@@ -26,7 +26,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error('Impossible de joindre le serveur.')
   }
   if (!response.ok) {
-    // FastAPI errors look like {"detail": "..."}.
     const body = await response.json().catch(() => null)
     const detail = typeof body?.detail === 'string' ? body.detail : null
     throw new Error(detail ?? `Erreur ${response.status}`)
@@ -49,14 +48,68 @@ export function getMessages(conversationId: number): Promise<Message[]> {
   return request(`/conversations/${conversationId}/messages`)
 }
 
-export interface ChatResult {
-  reply: string
-  notification: string | null // set when the backend also stored a system-notification
+// Récupération de la liste des modèles autorisés par le backend
+export async function getModels(): Promise<string[]> {
+  const data = await request<{ models: string[] }>('/models')
+  return data.models
 }
 
-export function sendMessage(conversationId: number, message: string): Promise<ChatResult> {
-  return request('/chat', {
+// Envoi d'un message en mode SSE (Streaming)
+export async function sendMessageStream(
+  conversationId: number,
+  message: string,
+  model: string,
+  role: 'user' | 'note',
+  onChunk: (chunk: string) => void
+): Promise<void> {
+  const response = await fetch('/api/chat/stream', {
     method: 'POST',
-    body: JSON.stringify({ conversation_id: conversationId, message }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      conversation_id: conversationId,
+      message,
+      model,
+      role,
+    }),
   })
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.detail ?? `Erreur ${response.status}`)
+  }
+
+  if (!response.body) return
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? '' // Conserve le dernier morceau partiel
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith('data: ')) {
+        const dataStr = trimmed.slice(6).trim()
+        if (dataStr === '[DONE]') break
+
+        try {
+          const parsed = JSON.parse(dataStr)
+          if (parsed.error) {
+            throw new Error(parsed.error)
+          }
+          if (parsed.content) {
+            onChunk(parsed.content)
+          }
+        } catch {
+          // Fragment JSON partiel ignoré
+        }
+      }
+    }
+  }
 }

@@ -3,8 +3,9 @@ import './App.css'
 import {
   createConversation,
   getMessages,
+  getModels,
   listConversations,
-  sendMessage,
+  sendMessageStream,
   type ConversationSummary,
 } from './api'
 import ChatWindow, { type ChatMessage } from './components/ChatWindow'
@@ -22,7 +23,12 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // On startup, load the history and open the most recent conversation.
+  // Modèles et Rôle Custom
+  const [models, setModels] = useState<string[]>([])
+  const [selectedModel, setSelectedModel] = useState<string>('')
+  const [sendAsNote, setSendAsNote] = useState<boolean>(false)
+
+  // Charger les conversations et la liste des modèles au démarrage
   useEffect(() => {
     listConversations()
       .then((list) => {
@@ -30,9 +36,16 @@ export default function App() {
         if (list.length > 0) setActiveId(list[0].id)
       })
       .catch((err) => setError(errorMessage(err)))
+
+    getModels()
+      .then((availableModels) => {
+        setModels(availableModels)
+        if (availableModels.length > 0) setSelectedModel(availableModels[0])
+      })
+      .catch((err) => setError(errorMessage(err)))
   }, [])
 
-  // Load the messages whenever another conversation is opened.
+  // Charger les messages à l'ouverture d'une conversation
   useEffect(() => {
     if (activeId === null) return
     let cancelled = false
@@ -72,24 +85,47 @@ export default function App() {
   }
 
   async function handleSend() {
-    if (activeId === null) return
+    if (activeId === null || !selectedModel) return
     const text = draft.trim()
+    if (!text) return
+
     const isFirstMessage = messages.length === 0
+    const targetRole: 'user' | 'note' = sendAsNote ? 'note' : 'user'
+
     setError(null)
     setDraft('')
-    setMessages((list) => [...list, { role: 'user', content: text }])
     setLoading(true)
+
+    // 1. Ajout optimiste du message utilisateur ou de la note
+    setMessages((list) => [...list, { role: targetRole, content: text }])
+
+    // Si c'est une note, elle n'appelle pas le LLM pour générer une réponse
+    if (targetRole === 'note') {
+      setLoading(false)
+      return
+    }
+
+    // 2. Ajout de la bulle vide de l'assistant pour recevoir le flux
+    setMessages((list) => [...list, { role: 'assistant', content: '' }])
+
     try {
-      const { reply, notification } = await sendMessage(activeId, text)
-      setMessages((list) => [
-        ...list,
-        { role: 'assistant', content: reply },
-        ...(notification ? [{ role: 'system-notification' as const, content: notification }] : []),
-      ])
-      // The first message becomes the conversation's preview in the sidebar.
+      await sendMessageStream(activeId, text, selectedModel, targetRole, (chunk) => {
+        setMessages((list) => {
+          const updated = [...list]
+          const lastIdx = updated.length - 1
+          if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
+            updated[lastIdx] = {
+              ...updated[lastIdx],
+              content: updated[lastIdx].content + chunk,
+            }
+          }
+          return updated
+        })
+      })
+
       if (isFirstMessage) setConversations(await listConversations())
     } catch (err) {
-      // The backend didn't save the turn: drop the optimistic message and give the text back.
+      // En cas d'erreur pendant le flux, retirer la bulle assistant incomplète
       setMessages((list) => list.slice(0, -1))
       setDraft(text)
       setError(errorMessage(err))
@@ -107,6 +143,35 @@ export default function App() {
         onNew={handleNew}
       />
       <main className="main">
+        {/* Barre de configuration (Sélection du modèle & option Note) */}
+        <div className="toolbar" style={{ padding: '10px 20px', display: 'flex', gap: '20px', alignItems: 'center', background: '#f5f5f5', borderBottom: '1px solid #ddd' }}>
+          <div>
+            <label htmlFor="model-select" style={{ marginRight: '8px', fontWeight: 'bold' }}>Modèle : </label>
+            <select
+              id="model-select"
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              disabled={loading}
+            >
+              {models.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={sendAsNote}
+                onChange={(e) => setSendAsNote(e.target.checked)}
+                disabled={loading}
+              />
+              <span>Envoyer comme <strong>Note personnelle</strong> (non transmise au LLM)</span>
+            </label>
+          </div>
+        </div>
+
         {error && (
           <div className="error" role="alert">
             {error}
