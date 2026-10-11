@@ -1,16 +1,23 @@
 import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    proxy: {
-      '/api': {
-        target: 'https://sturdy-dollop-4j4rjwrrw4vv377r4-8000.app.github.dev/',
-        changeOrigin: true,
-        secure: false,
-        rewrite: (path) => path.replace(/^\/api/, ''),
+export default defineConfig(({ mode }) => {
+  // Charge les variables d'environnement (comme VITE_API_URL)
+  const env = loadEnv(mode, process.cwd(), '')
+  
+  return {
+    plugins: [react()],
+    server: {
+      proxy: {
+        '/api': {
+          // Si VITE_API_URL est défini, on l'utilise (ex: ton Codespace). 
+          // Sinon, on retombe par défaut sur le localhost pour les correcteurs.
+          target: env.VITE_API_URL || 'http://localhost:8000',
+          changeOrigin: true,
+          secure: false,
+          rewrite: (path) => path.replace(/^\/api/, ''),
+        },
       },
     },
-  },
+  }
 })
